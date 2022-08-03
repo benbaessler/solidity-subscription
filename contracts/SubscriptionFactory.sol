@@ -10,7 +10,7 @@ contract SubscriptionFactory is Ownable {
   uint256 constant public PERIOD_LENGTH = 30 days;
 
   IERC20 immutable private token;
-  uint256 private totalUserReserve;
+  uint256 public totalUserReserve;
 
   struct Subscription {
     uint256 period;
@@ -21,9 +21,9 @@ contract SubscriptionFactory is Ownable {
   // Total subscriber count
   uint256 public subscribers;
   // User address -> Subscription
-  mapping(address => Subscription) private subscriptions;
+  mapping(address => Subscription) public subscriptions;
   // User address -> Reserve amount
-  mapping(address => uint256) private reserveAmount;
+  mapping(address => uint256) public reserveAmount;
 
   error InsufficientBalance(uint256 balance, uint256 amountNeeded);
   error EmptyReserve();
@@ -63,11 +63,10 @@ contract SubscriptionFactory is Ownable {
 
   /// @notice Removes subscription from caller and withdraws any excess tokens from userReserve to the caller
   function unsubscribe() external onlySubscriber {
-    uint256 _reserveAmount = reserveAmount[msg.sender];
-
     subscriptions[msg.sender] = Subscription(0, 0, false);
 
     // Withdraw user deposited reserve tokens
+    uint256 _reserveAmount = reserveAmount[msg.sender];
     if (_reserveAmount != 0) {
       _reserveAmount = 0;
       totalUserReserve = totalUserReserve - _reserveAmount;
@@ -119,6 +118,7 @@ contract SubscriptionFactory is Ownable {
   /// @param user wallet address
   function _updateSubscription(address user) internal {
     Subscription storage _subscription = subscriptions[user];
+    if (!_subscription.active) revert NoSubscription();
 
     uint256 newPeriodStart = _subscription.lastPeriodStart + PERIOD_LENGTH;
     if (newPeriodStart > block.timestamp) return;
@@ -141,7 +141,7 @@ contract SubscriptionFactory is Ownable {
     return subscriptions[msg.sender];
   }
 
-  function isSubscriber(address _address) public view returns (bool) {
+  function isSubscribed(address _address) public view returns (bool) {
     return subscriptions[_address].active;
   } 
 
