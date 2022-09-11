@@ -18,7 +18,7 @@ describe('Subscription Contract', () => {
     token = await PaymentToken.deploy()
     
     const SubscriptionFactory = await ethers.getContractFactory('SubscriptionFactory')
-    source = await SubscriptionFactory.deploy(token.address)
+    source = await SubscriptionFactory.deploy(10, 60 * 60 * 24 * 30, token.address)
 
     await token.approve(source.address, 10000)
   })
