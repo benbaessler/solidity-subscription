@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Unlicensed
+// SPDX-License-Identifier: MIT
 pragma solidity 0.8.15;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -6,11 +6,12 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 contract SubscriptionFactory is Ownable {
 
-  uint256 constant public SUBSCRIPTION_FEE = 10;
-  uint256 constant public PERIOD_LENGTH = 30 days;
-
+  uint256 immutable private subscriptionFee;
+  uint256 immutable private periodLength;
   IERC20 immutable private token;
+
   uint256 public totalUserReserve;
+  uint256 public subscriberCount;
 
   struct Subscription {
     uint256 period;
@@ -19,13 +20,13 @@ contract SubscriptionFactory is Ownable {
   }
 
   // Total subscriber count
-  uint256 public subscribers;
   // User address -> Subscription
   mapping(address => Subscription) public subscriptions;
   // User address -> Reserve amount
   mapping(address => uint256) public reserveAmount;
 
-  error InsufficientBalance(uint256 balance, uint256 amountNeeded);
+  error InsufficientFunds();
+  error InsufficientReserve();
   error EmptyReserve();
   error NoSubscription();
   error AlreadySubscribed();
@@ -36,13 +37,13 @@ contract SubscriptionFactory is Ownable {
   }
 
   modifier availableBalance(uint256 multiplier) {
-    uint256 balance = token.balanceOf(msg.sender);
-    uint256 paymentAmount = multiplier * SUBSCRIPTION_FEE;
-    if (paymentAmount > balance) revert InsufficientBalance(balance, paymentAmount);
+    if (multiplier * subscriptionFee > token.balanceOf(msg.sender)) revert InsufficientFunds();
     _;
   }
 
-  constructor(address _paymentToken) {
+  constructor(uint256 _fee, uint256 _periodLength, address _paymentToken) {
+    subscriptionFee = _fee;
+    periodLength = _periodLength;
     token = IERC20(_paymentToken);
   }
 
@@ -52,23 +53,25 @@ contract SubscriptionFactory is Ownable {
   function subscribe(uint256 periodAmount) external availableBalance(periodAmount) {
     if (subscriptions[msg.sender].active) revert AlreadySubscribed();
 
-    token.transferFrom(msg.sender, address(this), periodAmount * SUBSCRIPTION_FEE);
+    token.transferFrom(msg.sender, address(this), periodAmount * subscriptionFee);
 
     subscriptions[msg.sender] = Subscription(1, block.timestamp, true);
+    ++subscriberCount;
     if (periodAmount > 1) {
-      reserveAmount[msg.sender] = SUBSCRIPTION_FEE * (periodAmount - 1);
-      totalUserReserve = totalUserReserve + SUBSCRIPTION_FEE * (periodAmount - 1);
+      reserveAmount[msg.sender] = subscriptionFee * (periodAmount - 1);
+      totalUserReserve = totalUserReserve + subscriptionFee * (periodAmount - 1);
     }
   }
 
   /// @notice Removes subscription from caller and withdraws any excess tokens from userReserve to the caller
   function unsubscribe() external onlySubscriber {
     subscriptions[msg.sender] = Subscription(0, 0, false);
+    --subscriberCount;
 
     // Withdraw user deposited reserve tokens
     uint256 _reserveAmount = reserveAmount[msg.sender];
     if (_reserveAmount != 0) {
-      _reserveAmount = 0;
+      reserveAmount[msg.sender] = 0;
       totalUserReserve = totalUserReserve - _reserveAmount;
       token.transfer(msg.sender, _reserveAmount);
     }
@@ -79,10 +82,9 @@ contract SubscriptionFactory is Ownable {
   /// @param amount of periods to pay for
   function deposit(uint256 amount) external onlySubscriber availableBalance(amount) {
     _updateSubscription(msg.sender);
-    uint256 _reserveAmount = reserveAmount[msg.sender];
-    uint256 paymentAmount = amount * SUBSCRIPTION_FEE;
+    uint256 paymentAmount = amount * subscriptionFee;
 
-    _reserveAmount = _reserveAmount + paymentAmount;
+    reserveAmount[msg.sender] = reserveAmount[msg.sender] + paymentAmount;
     totalUserReserve = totalUserReserve + paymentAmount;
 
     token.transferFrom(msg.sender, address(this), paymentAmount);
@@ -90,14 +92,15 @@ contract SubscriptionFactory is Ownable {
 
   /// @notice Withdraws tokens from reserve to subscriber wallet
   /// @param amount to withdraw
-  function withdraw(uint256 amount) public onlySubscriber {
+  function withdraw(uint256 amount) external onlySubscriber {
     _updateSubscription(msg.sender);
     uint256 _reserveAmount = reserveAmount[msg.sender];
     if (_reserveAmount == 0) revert EmptyReserve();
+    if (amount * subscriptionFee > _reserveAmount) revert InsufficientReserve();
 
-    uint256 total = amount * SUBSCRIPTION_FEE;
+    uint256 total = amount * subscriptionFee;
 
-    _reserveAmount = _reserveAmount - total;
+    reserveAmount[msg.sender] = _reserveAmount - total;
     totalUserReserve = totalUserReserve - total;
 
     token.transfer(msg.sender, total);
@@ -105,10 +108,7 @@ contract SubscriptionFactory is Ownable {
 
   /// @notice Withdraws accumulated fees to owner
   function withdrawFees() external payable onlyOwner {
-    uint256 balance = token.balanceOf(address(this));
-    if (balance == 0) revert EmptyReserve();
-
-    uint256 total = balance - totalUserReserve;
+    uint256 total = token.balanceOf(address(this)) - totalUserReserve;
     if (total == 0) revert EmptyReserve();
 
     token.transfer(msg.sender, total);
@@ -120,24 +120,27 @@ contract SubscriptionFactory is Ownable {
     Subscription storage _subscription = subscriptions[user];
     if (!_subscription.active) revert NoSubscription();
 
-    uint256 newPeriodStart = _subscription.lastPeriodStart + PERIOD_LENGTH;
+    uint256 newPeriodStart = _subscription.lastPeriodStart + periodLength;
     if (newPeriodStart > block.timestamp) return;
 
-    _subscription.period = _subscription.period + 1;
+    ++_subscription.period;
     _subscription.lastPeriodStart = newPeriodStart;
 
     uint256 reserve = reserveAmount[user];
-    if (reserve < SUBSCRIPTION_FEE) {
+    if (reserve < subscriptionFee) {
       _subscription.active = false;
     } else {
       _subscription.active = true;
-      reserve = reserve - SUBSCRIPTION_FEE;
+      reserveAmount[user] = reserve - subscriptionFee;
     }
   } 
 
-  /// @notice Returns subscription tied to caller address
-  function getSubscription() external returns (Subscription memory) {
+  function updateSubscription() external {
     _updateSubscription(msg.sender);
+  }
+
+  /// @notice Returns subscription tied to caller address
+  function getSubscription() external view returns (Subscription memory) {
     return subscriptions[msg.sender];
   }
 
